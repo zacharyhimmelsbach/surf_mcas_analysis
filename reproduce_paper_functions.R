@@ -530,6 +530,114 @@ create_report_docx <- function(results, output_path, title = "Paper Analyses Rep
 }
 
 
+#' Create Summary Word Document Report
+#'
+#' Generates a condensed Word document with key results only
+#'
+#' @param results List returned by run_paper_analyses()
+#' @param output_path Path for the output .docx file
+#' @param title Optional title for the report
+#' @return The officer document object (invisibly)
+create_summary_docx <- function(results, output_path, title = "Paper Analyses Summary") {
+
+ # Initialize document
+  doc <- read_docx()
+
+  # Title
+  doc <- doc |>
+    body_add_par(title, style = "heading 1") |>
+    body_add_par("", style = "Normal")
+
+  # ========================================
+  # Section 1: Group Comparison (Table 1)
+  # ========================================
+  if (!is.null(results$group_comparison)) {
+    doc <- doc |>
+      body_add_par("1. Group Comparison", style = "heading 2") |>
+      body_add_par("", style = "Normal")
+
+    grp_ft <- results$group_comparison$tbl |>
+      as_flex_table() |>
+      autofit()
+
+    doc <- doc |>
+      body_add_flextable(grp_ft) |>
+      body_add_par("Note: Values are Mean (SD). P-values from t-tests.", style = "Normal") |>
+      body_add_par("", style = "Normal")
+  }
+
+  # ========================================
+  # Section 2: Univariate Histograms (2 per row, larger)
+  # ========================================
+  doc <- doc |>
+    body_add_par("2. Distribution of Variables", style = "heading 2") |>
+    body_add_par("", style = "Normal")
+
+  # Recreate histogram with 2 columns
+  hist_data <- results$univariate$histogram$data
+  hist_plot <- ggplot(hist_data, aes(x = value)) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.7) +
+    facet_wrap(~ variable_label, scales = "free", ncol = 2) +
+    labs(x = "Value", y = "Count") +
+    theme_minimal() +
+    theme(strip.text = element_text(size = 11, face = "bold"))
+
+  hist_temp <- tempfile(fileext = ".png")
+  ggsave(hist_temp, hist_plot, width = 10, height = 12, dpi = 150)
+  doc <- doc |>
+    body_add_img(hist_temp, width = 6.5, height = 7.8) |>
+    body_add_par("", style = "Normal")
+
+  # ========================================
+  # Section 3: Bivariate Summary Table
+  # ========================================
+  doc <- doc |>
+    body_add_par("3. Bivariate Associations", style = "heading 2") |>
+    body_add_par("", style = "Normal")
+
+  # Build consolidated table from bivariate results
+  bivariate_summary <- do.call(rbind, lapply(results$bivariate, function(res) {
+    # Get coefficients
+    coef_unadj <- summary(res$model_unadjusted)$coefficients
+    coef_adj <- summary(res$model_adjusted)$coefficients
+
+    # Extract the x variable coefficient (not intercept)
+    x_var <- res$x_var
+    unadj_est <- coef_unadj[x_var, "Estimate"]
+    unadj_se <- coef_unadj[x_var, "Std. Error"]
+    adj_est <- coef_adj[x_var, "Estimate"]
+    adj_se <- coef_adj[x_var, "Std. Error"]
+
+    data.frame(
+      X = res$x_var,
+      Y = res$y_var,
+      r = round(res$correlation, 3),
+      Unadjusted = paste0(round(unadj_est, 3), " (", round(unadj_se, 3), ")"),
+      Adjusted = paste0(round(adj_est, 3), " (", round(adj_se, 3), ")")
+    )
+  }))
+
+  colnames(bivariate_summary) <- c("X Variable", "Y Variable", "r", "Unadjusted β (SE)", "Adjusted β (SE)")
+
+  bivariate_ft <- bivariate_summary |>
+    flextable() |>
+    autofit() |>
+    theme_booktabs() |>
+    align(j = 3:5, align = "center", part = "all")
+
+  doc <- doc |>
+    body_add_flextable(bivariate_ft) |>
+    body_add_par("Note: β = regression coefficient, SE = standard error. Adjusted models control for background variables.", style = "Normal") |>
+    body_add_par("", style = "Normal")
+
+  # Save document
+  print(doc, target = output_path)
+  cat("Summary document saved to:", output_path, "\n")
+
+  invisible(doc)
+}
+
+
 #' Run All Paper Analyses
 #'
 #' Main wrapper function that runs univariate, bivariate, and multivariate analyses
@@ -630,10 +738,15 @@ run_paper_analyses <- function(df,
     multivariate = pca_results
   )
 
-  # Generate Word document if output_dir is specified
+  # Generate Word documents if output_dir is specified
   if (!is.null(output_dir)) {
+    # Full detailed report
     docx_path <- file.path(output_dir, "paper_analyses_report.docx")
     create_report_docx(results, docx_path, title = "Paper Analyses Report")
+
+    # Summary report
+    summary_path <- file.path(output_dir, "paper_analyses_summary.docx")
+    create_summary_docx(results, summary_path, title = "Paper Analyses Summary")
   }
 
   cat("\n========================================\n")
