@@ -9,6 +9,7 @@ library(stargazer)
 library(officer)
 library(flextable)
 library(gtsummary)
+library(lme4)
 
 
 #' Group Comparison (Table 1)
@@ -71,16 +72,22 @@ group_comparison <- function(df, group_var, compare_vars, compare_labels = NULL,
 #'
 #' Generates histograms and summary statistics for target variables
 #'
-#' @param df Data frame containing the variables
+#' @param df Data frame containing the variables (school-level)
 #' @param vars Character vector of variable names to analyze
 #' @param labels Character vector of labels (same length as vars)
+#' @param student_df Optional student-level data frame for ICC calculation
+#' @param school_id_var Name of the school ID variable in student_df (required if student_df provided)
 #' @param output_dir Optional directory to save outputs (NULL = don't save)
 #' @return List with histogram (ggplot) and summary_table (data.frame)
-univariate_analysis <- function(df, vars, labels, output_dir = NULL) {
+univariate_analysis <- function(df, vars, labels, student_df = NULL, school_id_var = NULL, output_dir = NULL) {
 
   # Validate inputs
   if (length(vars) != length(labels)) {
     stop("vars and labels must have the same length")
+  }
+
+  if (!is.null(student_df) && is.null(school_id_var)) {
+    stop("school_id_var is required when student_df is provided")
   }
 
   # Create named vector for labeling
@@ -113,6 +120,44 @@ univariate_analysis <- function(df, vars, labels, output_dir = NULL) {
     pivot_wider(names_from = statistic, values_from = value) |>
     mutate(label = labels[variable]) |>
     select(variable, label, n, mean, sd)
+
+  # Calculate ICCs if student-level data provided
+  if (!is.null(student_df)) {
+    icc_values <- sapply(vars, function(v) {
+      if (v %in% names(student_df)) {
+        # Build formula for random intercept model
+        formula_str <- paste0(v, " ~ 1 + (1 | ", school_id_var, ")")
+        tryCatch({
+          model <- lmer(as.formula(formula_str), data = student_df, REML = TRUE)
+          vc <- as.data.frame(VarCorr(model))
+          var_between <- vc$vcov[vc$grp == school_id_var]
+          var_within <- vc$vcov[vc$grp == "Residual"]
+          icc <- var_between / (var_between + var_within)
+          return(icc)
+        }, error = function(e) {
+          warning(paste("Could not calculate ICC for", v, ":", e$message))
+          return(NA_real_)
+        })
+      } else {
+        return(NA_real_)
+      }
+    })
+
+    # Also calculate student-level SD
+    student_sd_values <- sapply(vars, function(v) {
+      if (v %in% names(student_df)) {
+        sd(student_df[[v]], na.rm = TRUE)
+      } else {
+        NA_real_
+      }
+    })
+
+    summary_table <- summary_table |>
+      mutate(
+        student_sd = student_sd_values[variable],
+        icc = icc_values[variable]
+      )
+  }
 
   # Save outputs if directory specified
   if (!is.null(output_dir)) {
@@ -588,6 +633,42 @@ create_summary_docx <- function(results, output_path, title = "Paper Analyses Su
     body_add_img(hist_temp, width = 6.5, height = 7.8) |>
     body_add_par("", style = "Normal")
 
+  # Univariate summary table
+  doc <- doc |>
+    body_add_par("Summary Statistics", style = "heading 3")
+
+  # Format table - check if ICC columns exist
+  uni_summary <- results$univariate$summary_table
+  has_icc <- "icc" %in% names(uni_summary)
+
+  if (has_icc) {
+    uni_table_display <- uni_summary |>
+      mutate(
+        mean = round(mean, 2),
+        sd = round(sd, 2),
+        student_sd = round(student_sd, 2),
+        icc = round(icc, 3)
+      ) |>
+      select(Label = label, N = n, Mean = mean, `School SD` = sd,
+             `Student SD` = student_sd, ICC = icc)
+  } else {
+    uni_table_display <- uni_summary |>
+      mutate(
+        mean = round(mean, 2),
+        sd = round(sd, 2)
+      ) |>
+      select(Label = label, N = n, Mean = mean, SD = sd)
+  }
+
+  uni_ft <- uni_table_display |>
+    flextable() |>
+    autofit() |>
+    theme_booktabs()
+
+  doc <- doc |>
+    body_add_flextable(uni_ft) |>
+    body_add_par("", style = "Normal")
+
   # ========================================
   # Section 3: Bivariate Summary Table
   # ========================================
@@ -642,12 +723,14 @@ create_summary_docx <- function(results, output_path, title = "Paper Analyses Su
 #'
 #' Main wrapper function that runs univariate, bivariate, and multivariate analyses
 #'
-#' @param df Data frame containing all variables
+#' @param df Data frame containing all variables (school-level)
 #' @param group_var Optional grouping variable for Table 1 comparison (NULL to skip)
 #' @param compare_vars Optional variables to compare across groups
 #' @param compare_labels Optional labels for comparison variables
 #' @param target_vars Character vector of variable names for univariate analysis
 #' @param target_labels Character vector of labels for target variables
+#' @param student_df Optional student-level data for ICC calculation
+#' @param school_id_var Name of school ID variable in student_df (required if student_df provided)
 #' @param var_pairs List of c(x_var, y_var) pairs for bivariate analysis
 #' @param background_vars Character vector of control variable names
 #' @param pca_vars Character vector of variable names for PCA
@@ -663,6 +746,8 @@ create_summary_docx <- function(results, output_path, title = "Paper Analyses Su
 #'   compare_labels = c("Math Score", "ELA Score"),
 #'   target_vars = c("math_score", "ela_score", "attendance"),
 #'   target_labels = c("Math Score", "ELA Score", "Attendance Rate"),
+#'   student_df = student_data,
+#'   school_id_var = "school_id",
 #'   var_pairs = list(
 #'     c("pct_lowinc", "math_score"),
 #'     c("pct_ell", "ela_score")
@@ -678,6 +763,8 @@ run_paper_analyses <- function(df,
                                compare_labels = NULL,
                                target_vars,
                                target_labels,
+                               student_df = NULL,
+                               school_id_var = NULL,
                                var_pairs,
                                background_vars,
                                pca_vars,
@@ -705,9 +792,16 @@ run_paper_analyses <- function(df,
 
   # Univariate analysis
   cat(section_num, ". Univariate Analysis\n", sep = "")
-  cat("   Variables:", paste(target_vars, collapse = ", "), "\n\n")
+  cat("   Variables:", paste(target_vars, collapse = ", "), "\n")
+  if (!is.null(student_df)) {
+    cat("   ICCs: Calculating from student-level data\n")
+  }
+  cat("\n")
   univariate_dir <- if (!is.null(output_dir)) file.path(output_dir, "univariate") else NULL
-  univariate_results <- univariate_analysis(df, target_vars, target_labels, univariate_dir)
+  univariate_results <- univariate_analysis(df, target_vars, target_labels,
+                                            student_df = student_df,
+                                            school_id_var = school_id_var,
+                                            output_dir = univariate_dir)
   print(univariate_results$summary_table)
   cat("\n")
 
