@@ -35,7 +35,7 @@ bivariate_pairs <- lapply(surf_vars, function(x) {
 cntrl_vars <- c("pct_white", "pct_ell", "pct_lowinc", "pct_sped")
 
 
-
+# Load main wrapper function and run analyses
 source("reproduce_paper_functions.R")
 run_paper_analyses(
   df = df,
@@ -47,5 +47,5 @@ run_paper_analyses(
   var_pairs = bivariate_pairs,
   background_vars = cntrl_vars,
   pca_vars = c(surf_vars, dese_vars),
-  output_dir = "results_2024_test"
+  output_dir = "results_2024"
 )
